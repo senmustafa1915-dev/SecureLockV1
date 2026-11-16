@@ -1,0 +1,722 @@
+name: Secure Lock Android Build
+
+'on':
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Secure Lock APK Derleme
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Kaynak kodunu al
+        uses: actions/checkout@v4
+
+      - name: Java 17 kur
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Önceden kurulu Android SDK'yı hazırla
+        shell: bash
+        run: |
+          set -euo pipefail
+          SDK_ROOT="/usr/local/lib/android/sdk"
+          SDKMANAGER="$SDK_ROOT/cmdline-tools/latest/bin/sdkmanager"
+          echo "ANDROID_HOME=$SDK_ROOT" >> "$GITHUB_ENV"
+          echo "ANDROID_SDK_ROOT=$SDK_ROOT" >> "$GITHUB_ENV"
+          echo "$SDK_ROOT/cmdline-tools/latest/bin" >> "$GITHUB_PATH"
+          echo "$SDK_ROOT/platform-tools" >> "$GITHUB_PATH"
+          { yes || true; } | "$SDKMANAGER" --licenses
+          "$SDKMANAGER" --install "platforms;android-34" "build-tools;34.0.0"
+
+      - name: Gradle 8.7 kur
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.7'
+
+      - name: Android proje dosyalarını oluştur
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p app/src/main/java/com/securelock/guard
+          mkdir -p app/src/main/res/xml
+          mkdir -p app/src/main/res/values
+
+          cat > settings.gradle.kts <<'EOF'
+          pluginManagement {
+              repositories { google(); mavenCentral(); gradlePluginPortal() }
+          }
+          dependencyResolutionManagement {
+              repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
+              repositories { google(); mavenCentral() }
+          }
+          rootProject.name = "SecureLock"
+          include(":app")
+          EOF
+
+          cat > build.gradle.kts <<'EOF'
+          plugins {
+              id("com.android.application") version "8.5.2" apply false
+              id("org.jetbrains.kotlin.android") version "1.9.24" apply false
+          }
+          EOF
+
+          cat > gradle.properties <<'EOF'
+          org.gradle.jvmargs=-Xmx2g -Dfile.encoding=UTF-8
+          android.useAndroidX=true
+          kotlin.code.style=official
+          EOF
+
+          cat > app/build.gradle.kts <<'EOF'
+          plugins {
+              id("com.android.application")
+              id("org.jetbrains.kotlin.android")
+          }
+          android {
+              namespace = "com.securelock.guard"
+              compileSdk = 34
+              defaultConfig {
+                  applicationId = "com.securelock.guard"
+                  minSdk = 26
+                  targetSdk = 34
+                  versionCode = 1
+                  versionName = "1.0"
+              }
+              compileOptions {
+                  sourceCompatibility = JavaVersion.VERSION_17
+                  targetCompatibility = JavaVersion.VERSION_17
+              }
+              kotlinOptions { jvmTarget = "17" }
+          }
+          dependencies {
+              implementation("androidx.appcompat:appcompat:1.6.1")
+              implementation("androidx.recyclerview:recyclerview:1.3.2")
+              implementation("androidx.drawerlayout:drawerlayout:1.2.0")
+              implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.7.3")
+          }
+          EOF
+
+          cat > app/src/main/AndroidManifest.xml <<'EOF'
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+              <uses-permission android:name="android.permission.QUERY_ALL_PACKAGES" />
+              <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
+              <application
+                  android:allowBackup="false"
+                  android:label="Secure Lock"
+                  android:theme="@android:style/Theme.Material.NoActionBar"
+                  android:supportsRtl="true">
+                  <activity
+                      android:name=".MainActivity"
+                      android:exported="true"
+                      android:excludeFromRecents="true">
+                      <intent-filter>
+                          <action android:name="android.intent.action.MAIN" />
+                          <category android:name="android.intent.category.LAUNCHER" />
+                      </intent-filter>
+                  </activity>
+                  <service
+                      android:name=".LockAccessibilityService"
+                      android:label="Secure Lock"
+                      android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE"
+                      android:exported="true">
+                      <intent-filter>
+                          <action android:name="android.accessibilityservice.AccessibilityService" />
+                      </intent-filter>
+                      <meta-data
+                          android:name="android.accessibilityservice"
+                          android:resource="@xml/accessibility_service_config" />
+                  </service>
+                  <receiver
+                      android:name=".SecureLockAdminReceiver"
+                      android:permission="android.permission.BIND_DEVICE_ADMIN"
+                      android:exported="true">
+                      <meta-data
+                          android:name="android.app.device_admin"
+                          android:resource="@xml/device_admin" />
+                      <intent-filter>
+                          <action android:name="android.app.action.DEVICE_ADMIN_ENABLED" />
+                      </intent-filter>
+                  </receiver>
+                  <receiver android:name=".BootReceiver" android:enabled="true" android:exported="false">
+                      <intent-filter>
+                          <action android:name="android.intent.action.BOOT_COMPLETED" />
+                      </intent-filter>
+                  </receiver>
+              </application>
+          </manifest>
+          EOF
+
+          cat > app/src/main/res/xml/accessibility_service_config.xml <<'EOF'
+          <accessibility-service
+              xmlns:android="http://schemas.android.com/apk/res/android"
+              android:accessibilityEventTypes="typeWindowStateChanged|typeWindowsChanged"
+              android:accessibilityFeedbackType="feedbackGeneric"
+              android:notificationTimeout="0"
+              android:canRetrieveWindowContent="false"
+              android:description="@string/accessibility_description" />
+          EOF
+
+          cat > app/src/main/res/xml/device_admin.xml <<'EOF'
+          <device-admin xmlns:android="http://schemas.android.com/apk/res/android">
+              <uses-policies>
+                  <force-lock />
+              </uses-policies>
+          </device-admin>
+          EOF
+
+          cat > app/src/main/res/values/strings.xml <<'EOF'
+          <resources>
+              <string name="app_name">Secure Lock</string>
+              <string name="accessibility_description">Kilitli uygulamaları algılar ve şifre ekranını gösterir. Bildirimleri okumaz.</string>
+          </resources>
+          EOF
+
+          cat > app/src/main/java/com/securelock/guard/PasswordUtil.kt <<'EOF'
+          package com.securelock.guard
+          import android.content.Context
+          import android.util.Base64
+          import java.security.MessageDigest
+          import java.security.SecureRandom
+          import javax.crypto.SecretKeyFactory
+          import javax.crypto.spec.PBEKeySpec
+
+          object PasswordUtil {
+              private const val ITERATIONS = 100000
+              private const val KEY_LENGTH = 256
+              fun create(password: String): Pair<String, String> {
+                  val salt = ByteArray(16); SecureRandom().nextBytes(salt)
+                  val hash = derive(password, salt)
+                  return Pair(Base64.encodeToString(salt, Base64.NO_WRAP), Base64.encodeToString(hash, Base64.NO_WRAP))
+              }
+              fun verify(password: String, saltText: String?, hashText: String?): Boolean {
+                  if (saltText.isNullOrBlank() || hashText.isNullOrBlank()) return false
+                  return try {
+                      val salt = Base64.decode(saltText, Base64.NO_WRAP)
+                      val expected = Base64.decode(hashText, Base64.NO_WRAP)
+                      val actual = derive(password, salt)
+                      MessageDigest.isEqual(expected, actual)
+                  } catch (_: Exception) { false }
+              }
+              private fun derive(password: String, salt: ByteArray): ByteArray {
+                  val spec = PBEKeySpec(password.toCharArray(), salt, ITERATIONS, KEY_LENGTH)
+                  return try { SecretKeyFactory.getInstance("PBKDF2WithHmacSHA256").generateSecret(spec).encoded } finally { spec.clearPassword() }
+              }
+          }
+
+          object LockStore {
+              private const val PREFS = "secure_lock_v1"
+              fun prefs(context: Context) = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+              fun saveSecret(context: Context, key: String, password: String) {
+                  val (salt, hash) = PasswordUtil.create(password)
+                  prefs(context).edit().putString("${key}_salt", salt).putString("${key}_hash", hash).putInt("${key}_length", password.length).apply()
+              }
+              fun verifySecret(context: Context, key: String, password: String): Boolean {
+                  val p = prefs(context)
+                  return PasswordUtil.verify(password, p.getString("${key}_salt", null), p.getString("${key}_hash", null))
+              }
+              fun secretLength(context: Context, key: String): Int = prefs(context).getInt("${key}_length", 0)
+              fun mode(context: Context, packageName: String): String = prefs(context).getString("mode:$packageName", "") ?: ""
+              fun setMode(context: Context, packageName: String, value: String) { prefs(context).edit().putString("mode:$packageName", value).apply() }
+              
+              fun strictUntil(context: Context, packageName: String): Long = prefs(context).getLong("strict:$packageName", 0L)
+              fun setStrictUntil(context: Context, packageName: String, until: Long) { prefs(context).edit().putLong("strict:$packageName", until).apply() }
+              fun isStrictActive(context: Context, packageName: String): Boolean = strictUntil(context, packageName) > System.currentTimeMillis()
+              
+              fun graceUntil(context: Context, packageName: String): Long = prefs(context).getLong("grace:$packageName", 0L)
+              fun setGraceUntil(context: Context, packageName: String, until: Long) { prefs(context).edit().putLong("grace:$packageName", until).apply() }
+              
+              fun isLockedNow(context: Context, packageName: String): Boolean {
+                  val now = System.currentTimeMillis()
+                  if (strictUntil(context, packageName) > now) return true
+                  if (graceUntil(context, packageName) > now) return false
+                  return when (mode(context, packageName)) {
+                      "NORMAL", "VIP" -> true
+                      else -> false
+                  }
+              }
+              fun passwordKeyFor(context: Context, packageName: String): String = if (mode(context, packageName) == "VIP") "vip:$packageName" else "normal"
+          }
+          EOF
+
+          cat > app/src/main/java/com/securelock/guard/MainActivity.kt <<'EOF'
+          package com.securelock.guard
+
+          import android.app.Activity
+          import android.app.AlertDialog
+          import android.app.admin.DevicePolicyManager
+          import android.content.ComponentName
+          import android.content.Context
+          import android.content.Intent
+          import android.graphics.Color
+          import android.graphics.Typeface
+          import android.graphics.drawable.Drawable
+          import android.graphics.drawable.GradientDrawable
+          import android.os.Bundle
+          import android.os.Handler
+          import android.os.Looper
+          import android.provider.Settings
+          import android.text.Editable
+          import android.text.InputType
+          import android.text.TextWatcher
+          import android.view.Gravity
+          import android.view.View
+          import android.view.ViewGroup
+          import android.widget.Button
+          import android.widget.EditText
+          import android.widget.ImageView
+          import android.widget.LinearLayout
+          import android.widget.ScrollView
+          import android.widget.TextView
+          import android.widget.Toast
+          import androidx.appcompat.app.AppCompatActivity
+          import androidx.drawerlayout.widget.DrawerLayout
+          import java.util.Locale
+
+          class MainActivity : AppCompatActivity() {
+              private var allApps: List<AppItem> = emptyList()
+              private var query = ""
+              private var listBox: LinearLayout? = null
+              private lateinit var drawerLayout: DrawerLayout
+              
+              private val bg = Color.rgb(10, 10, 10)
+              private val panel = Color.rgb(25, 25, 25)
+              private val white = Color.WHITE
+              private val muted = Color.LTGRAY
+              private val accent = Color.rgb(80, 170, 255)
+
+              data class AppItem(val name: String, val packageName: String, val icon: Drawable)
+
+              private fun dp(v: Int): Int = (v * resources.displayMetrics.density).toInt()
+
+              override fun onCreate(savedInstanceState: Bundle?) {
+                  super.onCreate(savedInstanceState)
+                  window.statusBarColor = bg; window.navigationBarColor = bg
+                  if (LockStore.prefs(this).getString("admin_hash", null).isNullOrBlank()) {
+                      firstRunSetup()
+                  } else {
+                      showGate()
+                  }
+              }
+
+              private fun showGate() {
+                  val root = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; gravity = Gravity.CENTER; setBackgroundColor(Color.BLACK); setPadding(dp(32), dp(32), dp(32), dp(32)) }
+                  val title = TextView(this).apply { text = "SECURE LOCK"; setTextColor(white); textSize = 28f; typeface = Typeface.DEFAULT_BOLD; gravity = Gravity.CENTER }
+                  val input = EditText(this).apply { hint = "Yönetici Şifresi"; setHintTextColor(muted); setTextColor(white); inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_PASSWORD; setPadding(dp(16), dp(12), dp(16), dp(12)) }
+                  val bgDraw = GradientDrawable().apply { setColor(panel); cornerRadius = 30f }; input.background = bgDraw
+                  val msg = TextView(this).apply { setTextColor(Color.RED); setPadding(0, dp(10), 0, dp(10)) }
+                  
+                  input.addTextChangedListener(object : TextWatcher {
+                      override fun afterTextChanged(s: Editable?) {
+                          if (LockStore.verifySecret(this@MainActivity, "admin", s.toString())) {
+                              showMainUI()
+                          } else if (s.toString().length >= 4) {
+                              msg.text = "Yanlış Şifre"
+                          }
+                      }
+                      override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) {}
+                      override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) {}
+                  })
+
+                  root.addView(title, LinearLayout.LayoutParams(-2, -2).apply { setMargins(0,0,0,dp(24)) })
+                  root.addView(input, LinearLayout.LayoutParams(-1, -2))
+                  root.addView(msg)
+                  setContentView(root)
+                  input.requestFocus()
+              }
+
+              private fun firstRunSetup() {
+                  val root = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; gravity = Gravity.CENTER; setBackgroundColor(Color.BLACK); setPadding(dp(32), dp(32), dp(32), dp(32)) }
+                  val title = TextView(this).apply { text = "Yeni Yönetici Şifresi"; setTextColor(white); textSize = 24f }
+                  val input = EditText(this).apply { hint = "En az 4 karakter"; setHintTextColor(muted); setTextColor(white); inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_PASSWORD }
+                  val btn = Button(this).apply { 
+                      text = "Kaydet ve Başla"; setTextColor(white); 
+                      val d = GradientDrawable().apply { setColor(Color.parseColor("#4CAF50")); cornerRadius = 30f }; background = d
+                      setOnClickListener {
+                          if (input.text.length >= 4) {
+                              LockStore.saveSecret(this@MainActivity, "admin", input.text.toString())
+                              LockStore.saveSecret(this@MainActivity, "normal", "1234") // Varsayılan
+                              LockStore.saveSecret(this@MainActivity, "vip", "1234") // Varsayılan
+                              showMainUI()
+                          }
+                      }
+                  }
+                  root.addView(title, LinearLayout.LayoutParams(-2, -2).apply { setMargins(0,0,0,dp(24)) })
+                  root.addView(input, LinearLayout.LayoutParams(-1, -2))
+                  root.addView(btn, LinearLayout.LayoutParams(-1, -2).apply { setMargins(0,dp(20),0,0) })
+                  setContentView(root)
+              }
+
+              private fun showMainUI() {
+                  drawerLayout = DrawerLayout(this).apply { setBackgroundColor(bg) }
+                  val mainContent = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setBackgroundColor(bg); setPadding(dp(16), dp(40), dp(16), dp(8)) }
+                  
+                  val topBar = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL }
+                  val menuBtn = TextView(this).apply { text = "☰"; setTextColor(white); textSize = 28f; setPadding(0,0,dp(16),0); setOnClickListener { drawerLayout.openDrawer(Gravity.LEFT) } }
+                  val title = TextView(this).apply { text = "Secure Lock"; setTextColor(white); textSize = 22f; typeface = Typeface.DEFAULT_BOLD }
+                  topBar.addView(menuBtn); topBar.addView(title)
+                  mainContent.addView(topBar)
+                  
+                  val dpm = getSystemService(Context.DEVICE_POLICY_SERVICE) as DevicePolicyManager
+                  val admin = ComponentName(this, SecureLockAdminReceiver::class.java)
+                  val adminBtn = Button(this).apply {
+                      text = if (dpm.isAdminActive(admin)) "Kaldırma Koruması: AKTİF" else "Kaldırma Korumasını Aç"
+                      setTextColor(white)
+                      val d = GradientDrawable().apply { setColor(if (dpm.isAdminActive(admin)) Color.parseColor("#4CAF50") else Color.parseColor("#F44336")); cornerRadius = 20f }; background = d
+                      setOnClickListener { if (!dpm.isAdminActive(admin)) { val intent = Intent(DevicePolicyManager.ACTION_ADD_DEVICE_ADMIN); intent.putExtra(DevicePolicyManager.EXTRA_DEVICE_ADMIN, admin); startActivity(intent) } }
+                  }
+                  mainContent.addView(adminBtn, LinearLayout.LayoutParams(-1, dp(45)).apply { setMargins(0,dp(16),0,dp(8)) })
+                  
+                  val search = EditText(this).apply { 
+                      hint = "Uygulama Ara..."; setHintTextColor(muted); setTextColor(white); isSingleLine = true
+                      val d = GradientDrawable().apply { setColor(panel); cornerRadius = 20f }; background = d; setPadding(dp(16), dp(12), dp(16), dp(12))
+                      addTextChangedListener(object : TextWatcher {
+                          override fun afterTextChanged(s: Editable?) { query = s.toString().trim().lowercase(); fillList() }
+                          override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) {}
+                          override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) {}
+                      })
+                  }
+                  mainContent.addView(search, LinearLayout.LayoutParams(-1, -2).apply { setMargins(0,dp(8),0,dp(16)) })
+                  
+                  val sv = ScrollView(this); listBox = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }; sv.addView(listBox)
+                  mainContent.addView(sv, LinearLayout.LayoutParams(-1, 0, 1f))
+                  
+                  val drawerContent = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setBackgroundColor(Color.parseColor("#1A1A1A")); setPadding(dp(20), dp(50), dp(20), dp(20)) }
+                  val dTitle = TextView(this).apply { text = "SECURE LOCK"; setTextColor(white); textSize = 22f; typeface = Typeface.DEFAULT_BOLD }
+                  drawerContent.addView(dTitle, LinearLayout.LayoutParams(-2, -2).apply { setMargins(0,0,0,dp(40)) })
+                  
+                  fun addMenuItem(text: String, icon: String, action: () -> Unit) {
+                      val item = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL; setPadding(0, dp(16), 0, dp(16)) }
+                      val ic = TextView(this).apply { this.text = icon; textSize = 20f; setPadding(0,0,dp(16),0) }
+                      val tv = TextView(this).apply { this.text = text; setTextColor(white); textSize = 16f }
+                      item.addView(ic); item.addView(tv)
+                      item.setOnClickListener { action() }
+                      drawerContent.addView(item)
+                  }
+
+                  addMenuItem("Uygulamalar", "🏠") { drawerLayout.closeDrawer(Gravity.LEFT) }
+                  addMenuItem("Ayarlar & Güvenlik", "⚙️") { 
+                      drawerLayout.closeDrawer(Gravity.LEFT)
+                      askPassword("Yönetici Şifresi") { pwd ->
+                          if (LockStore.verifySecret(this, "admin", pwd)) {
+                              showSettings()
+                          } else toast("Yanlış Şifre")
+                      }
+                  }
+
+                  drawerLayout.addView(mainContent, DrawerLayout.LayoutParams(-1, -1))
+                  drawerLayout.addView(drawerContent, DrawerLayout.LayoutParams(dp(280), -1).apply { gravity = Gravity.LEFT })
+                  setContentView(drawerLayout)
+                  loadApps()
+              }
+
+              private fun showSettings() {
+                  val root = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setBackgroundColor(bg); setPadding(dp(20), dp(40), dp(20), dp(20)) }
+                  val title = TextView(this).apply { text = "Ayarlar & Güvenlik"; setTextColor(white); textSize = 24f; typeface = Typeface.DEFAULT_BOLD }
+                  root.addView(title, LinearLayout.LayoutParams(-2,-2).apply{ setMargins(0,0,0,dp(24)) })
+
+                  fun addBtn(txt: String, action: () -> Unit) {
+                      val b = Button(this).apply { text = txt; setTextColor(white); val d = GradientDrawable().apply { setColor(panel); cornerRadius = 20f }; background = d; setOnClickListener { action() } }
+                      root.addView(b, LinearLayout.LayoutParams(-1, dp(50)).apply { setMargins(0,0,0,dp(12)) })
+                  }
+
+                  addBtn("Erişilebilirlik Ayarlarını Aç") { startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS)) }
+                  addBtn("Normal Şifreyi Değiştir") { askPassword("Yeni Normal Şifre") { LockStore.saveSecret(this, "normal", it); toast("Değişti") } }
+                  addBtn("Sıkı Mod (VIP) Şifresini Değiştir") { askPassword("Yeni VIP Şifresi") { LockStore.saveSecret(this, "vip", it); toast("Değişti") } }
+                  addBtn("Yönetici Şifresini Değiştir") { askPassword("Yeni Yönetici Şifresi") { LockStore.saveSecret(this, "admin", it); toast("Değişti") } }
+                  addBtn("Geri Dön") { showMainUI() }
+
+                  setContentView(root)
+              }
+
+              private fun askPassword(title: String, callback: (String) -> Unit) {
+                  val input = EditText(this).apply { inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_PASSWORD; hint = "Şifre" }
+                  AlertDialog.Builder(this).setTitle(title).setView(input)
+                      .setPositiveButton("Onayla") { _, _ -> callback(input.text.toString()) }
+                      .setNegativeButton("İptal", null).show()
+              }
+
+              private fun loadApps() {
+                  Thread {
+                      val pm = packageManager
+                      val packs = pm.getInstalledApplications(0)
+                      val apps = packs.filter { it.packageName != packageName && !it.packageName.contains("inputmethod") }
+                          .distinctBy { it.packageName }
+                          .map { AppItem(it.loadLabel(pm).toString(), it.packageName, it.loadIcon(pm)) }
+                          .sortedBy { it.name.lowercase(Locale.getDefault()) }
+                      Handler(Looper.getMainLooper()).post {
+                          allApps = apps
+                          fillList()
+                      }
+                  }.start()
+              }
+
+              private fun fillList() {
+                  val box = listBox ?: return; box.removeAllViews()
+                  val filtered = allApps.filter { it.name.lowercase().contains(query) || it.packageName.contains(query) }
+                  val locked = filtered.filter { LockStore.isLockedNow(this, it.packageName) }
+                  val others = filtered.filterNot { LockStore.isLockedNow(this, it.packageName) }
+
+                  fun addHeader(t: String) { box.addView(TextView(this).apply { text = t; setTextColor(muted); textSize = 12f; setTypeface(null, Typeface.BOLD); setPadding(0, dp(16), 0, dp(8)) }) }
+
+                  if (locked.isNotEmpty()) { addHeader("KİLİTLİ UYGULAMALAR (${locked.size})"); locked.forEach { box.addView(appRow(it)) } }
+                  addHeader("DİĞER UYGULAMALAR (${others.size})")
+                  others.forEach { box.addView(appRow(it)) }
+              }
+
+              private fun appRow(app: AppItem): View {
+                  val r = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL; setPadding(dp(16), dp(12), dp(16), dp(12)) }
+                  val d = GradientDrawable().apply { setColor(panel); cornerRadius = 20f }; r.background = d
+                  val iv = ImageView(this).apply { setImageDrawable(app.icon) }; r.addView(iv, LinearLayout.LayoutParams(dp(40), dp(40)))
+                  val tv = TextView(this).apply { text = app.name; setTextColor(white); textSize = 16f; setPadding(dp(16), 0, dp(8), 0) }; r.addView(tv, LinearLayout.LayoutParams(0, -2, 1f))
+                  
+                  val isHard = LockStore.isStrictActive(this, app.packageName)
+                  val mode = LockStore.mode(this, app.packageName)
+                  val status = TextView(this).apply { text = if(isHard) "⏳" else if(mode == "VIP") "🛡️" else if(mode == "NORMAL") "🔒" else ""; textSize = 18f; setPadding(dp(8),0,dp(8),0) }
+                  r.addView(status)
+
+                  r.setOnClickListener {
+                      if (isHard) {
+                          Toast.makeText(this, "Katı Mod Aktif! Kapatılamaz.", Toast.LENGTH_SHORT).show()
+                      } else {
+                          val options = arrayOf("Normal Kilit", "Sıkı Mod (VIP)", "Katı Mod (Süreli)", "Kilidi Kaldır")
+                          AlertDialog.Builder(this).setTitle(app.name).setItems(options) { _, which ->
+                              when(which) {
+                                  0 -> { LockStore.setMode(this, app.packageName, "NORMAL"); fillList() }
+                                  1 -> { askPassword("VIP Şifresi Belirle") { LockStore.saveSecret(this, "vip:${app.packageName}", it); LockStore.setMode(this, app.packageName, "VIP"); fillList() } }
+                                  2 -> { askPassword("Süre (Saat)") { h -> val hours = h.toLongOrNull() ?: 1; LockStore.setStrictUntil(this, app.packageName, System.currentTimeMillis() + (hours * 3600000L)); LockStore.setMode(this, app.packageName, "NORMAL"); fillList() } }
+                                  3 -> { LockStore.setMode(this, app.packageName, ""); fillList() }
+                              }
+                          }.show()
+                      }
+                  }
+                  return r
+              }
+              
+              private fun toast(m: String) { Toast.makeText(this, m, Toast.LENGTH_SHORT).show() }
+          }
+          EOF
+
+          cat > app/src/main/java/com/securelock/guard/LockAccessibilityService.kt <<'EOF'
+          package com.securelock.guard
+
+          import android.accessibilityservice.AccessibilityService
+          import android.app.admin.DevicePolicyManager
+          import android.content.ComponentName
+          import android.content.Context
+          import android.graphics.Color
+          import android.graphics.PixelFormat
+          import android.graphics.Typeface
+          import android.os.Handler
+          import android.os.Looper
+          import android.text.Editable
+          import android.text.InputType
+          import android.text.TextWatcher
+          import android.view.Gravity
+          import android.view.View
+          import android.view.WindowManager
+          import android.view.accessibility.AccessibilityEvent
+          import android.widget.Button
+          import android.widget.EditText
+          import android.widget.LinearLayout
+          import android.widget.TextView
+          import java.util.concurrent.Executors
+
+          class LockAccessibilityService : AccessibilityService() {
+              private val handler = Handler(Looper.getMainLooper())
+              private val executor = Executors.newSingleThreadExecutor()
+              private var overlay: View? = null
+              private var overlayPackage: String? = null
+              private var overlayStatus: TextView? = null
+              private var passwordInput: EditText? = null
+              private var checking = false
+              private var currentPkg = ""
+              private var isSplitScreen = false
+
+              private val timerTask = object : Runnable {
+                  override fun run() {
+                      val pkg = overlayPackage ?: return
+                      if (LockStore.isStrictActive(this@LockAccessibilityService, pkg)) {
+                          val remaining = LockStore.strictUntil(this@LockAccessibilityService, pkg) - System.currentTimeMillis()
+                          overlayStatus?.text = "Katı Mod etkin\nKalan süre: ${formatDuration(remaining)}"
+                          if (remaining <= 0L) removeOverlay()
+                      }
+                      handler.postDelayed(this, 1000)
+                  }
+              }
+
+              override fun onAccessibilityEvent(event: AccessibilityEvent?) {
+                  if (event == null) return
+                  val pkg = event.packageName?.toString() ?: return
+                  
+                  if (event.eventType == AccessibilityEvent.TYPE_WINDOWS_CHANGED) {
+                      isSplitScreen = windows.size > 1
+                      if (isSplitScreen && currentPkg in LockStore.prefs(this).getStringSet("locked", emptySet())!!) {
+                          lockScreenNow()
+                          return
+                      }
+                  }
+
+                  if (event.eventType != AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED) return
+                  if (pkg == "com.android.systemui" || pkg == packageName) return
+                  
+                  currentPkg = pkg
+                  
+                  // SYSTEM SETTINGS SHIELD
+                  if (pkg == "com.android.settings") {
+                      val cls = event.className?.toString() ?: ""
+                      if (cls.contains("AccessibilitySettings") || cls.contains("DateTimeSettings") || cls.contains("DeviceAdminSettings") || cls.contains("DevelopmentSettings")) {
+                          showOverlay("Sistem Kalkanı", "", true)
+                          return
+                      }
+                  }
+
+                  if (isSplitScreen && LockStore.isLockedNow(this, pkg)) {
+                      lockScreenNow()
+                      return
+                  }
+
+                  if (LockStore.isLockedNow(this, pkg)) {
+                      val isHard = LockStore.isStrictActive(this, pkg)
+                      showOverlay(pkg, LockStore.passwordKeyFor(this, pkg), isHard)
+                  } else {
+                      removeOverlay()
+                  }
+              }
+
+              private fun lockScreenNow() {
+                  val dpm = getSystemService(Context.DEVICE_POLICY_SERVICE) as DevicePolicyManager
+                  val admin = ComponentName(this, SecureLockAdminReceiver::class.java)
+                  if (dpm.isAdminActive(admin)) { dpm.lockNow(); removeOverlay() }
+              }
+
+              private fun showOverlay(pkg: String, key: String, isHard: Boolean) {
+                  if (overlay != null && overlayPackage == pkg) return
+                  removeOverlay()
+                  overlayPackage = pkg
+
+                  val root = LinearLayout(this).apply {
+                      orientation = LinearLayout.VERTICAL
+                      gravity = Gravity.CENTER
+                      setPadding(60, 60, 60, 60)
+                      setBackgroundColor(Color.parseColor("#0A0A0A"))
+                      isFocusableInTouchMode = true
+                      requestFocus()
+                  }
+
+                  if (isHard) {
+                      val title = TextView(this).apply { text = "KATI MOD AKTİF"; setTextColor(Color.RED); textSize = 28f; typeface = Typeface.DEFAULT_BOLD; gravity = Gravity.CENTER }
+                      overlayStatus = TextView(this).apply { setTextColor(Color.WHITE); textSize = 20f; gravity = Gravity.CENTER; setPadding(0, 30, 0, 30) }
+                      val closeBtn = Button(this).apply { text = "Kapat ve Çık"; setTextColor(Color.WHITE); setOnClickListener { performGlobalAction(GLOBAL_ACTION_HOME); removeOverlay() } }
+                      
+                      root.addView(title)
+                      root.addView(overlayStatus)
+                      root.addView(closeBtn, LinearLayout.LayoutParams(-1, 120).apply { setMargins(0, 20, 0, 0) })
+                      handler.post(timerTask)
+                  } else {
+                      val title = TextView(this).apply { text = "SECURE LOCK"; setTextColor(Color.WHITE); textSize = 28f; typeface = Typeface.DEFAULT_BOLD; gravity = Gravity.CENTER }
+                      val input = EditText(this).apply {
+                          hint = "Şifre Girin"; setHintTextColor(Color.GRAY); setTextColor(Color.WHITE); inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_PASSWORD; gravity = Gravity.CENTER; setPadding(30, 30, 30, 30)
+                          val d = android.graphics.drawable.GradientDrawable(); d.setColor(Color.parseColor("#1E1E1E")); d.cornerRadius = 30f; background = d
+                      }
+                      passwordInput = input
+                      
+                      input.addTextChangedListener(object : TextWatcher {
+                          override fun afterTextChanged(s: Editable?) {
+                              val pin = s.toString()
+                              if (pin.isNotEmpty()) {
+                                  Thread {
+                                      val success = LockStore.verifySecret(this@LockAccessibilityService, key, pin)
+                                      handler.post {
+                                          if (success) {
+                                              removeOverlay()
+                                              // Optional: performGlobalAction(GLOBAL_ACTION_HOME) if we want to kill on unlock
+                                          }
+                                      }
+                                  }.start()
+                              }
+                          }
+                          override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) {}
+                          override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) {}
+                      })
+
+                      val break5 = Button(this).apply { text = "5 Dk Mola"; setOnClickListener { LockStore.setGraceUntil(this@LockAccessibilityService, pkg, System.currentTimeMillis() + 300000L); removeOverlay() } }
+                      val break10 = Button(this).apply { text = "10 Dk Mola"; setOnClickListener { LockStore.setGraceUntil(this@LockAccessibilityService, pkg, System.currentTimeMillis() + 600000L); removeOverlay() } }
+                      
+                      val breakRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; setPadding(0, 20, 0, 0) }
+                      breakRow.addView(break5, LinearLayout.LayoutParams(0, -2, 1f))
+                      breakRow.addView(break10, LinearLayout.LayoutParams(0, -2, 1f))
+
+                      root.addView(title)
+                      root.addView(input, LinearLayout.LayoutParams(-1, -2).apply { setMargins(0, 30, 0, 0) })
+                      root.addView(breakRow)
+                  }
+
+                  val params = WindowManager.LayoutParams(
+                      WindowManager.LayoutParams.MATCH_PARENT, WindowManager.LayoutParams.MATCH_PARENT,
+                      WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY,
+                      WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN or WindowManager.LayoutParams.FLAG_SECURE, 
+                      PixelFormat.OPAQUE
+                  )
+                  try {
+                      getSystemService(WindowManager::class.java).addView(root, params)
+                      overlay = root
+                  } catch (_: Exception) { overlay = null }
+              }
+
+              private fun removeOverlay() {
+                  handler.removeCallbacks(timerTask)
+                  val o = overlay
+                  if (o != null) try { getSystemService(WindowManager::class.java).removeView(o) } catch (_: Exception) {}
+                  overlay = null
+                  overlayPackage = null
+                  overlayStatus = null
+                  passwordInput = null
+              }
+
+              private fun formatDuration(ms: Long): String {
+                  val total = ms.coerceAtLeast(0L) / 1000L
+                  return String.format("%02d:%02d:%02d", (total % 86400) / 3600, (total % 3600) / 60, total % 60)
+              }
+
+              override fun onInterrupt() { removeOverlay() }
+              override fun onDestroy() { removeOverlay(); executor.shutdownNow(); super.onDestroy() }
+          }
+          EOF
+
+          cat > app/src/main/java/com/securelock/guard/SecureLockAdminReceiver.kt <<'EOF'
+          package com.securelock.guard
+          import android.app.admin.DeviceAdminReceiver
+          class SecureLockAdminReceiver : DeviceAdminReceiver()
+          EOF
+
+          cat > app/src/main/java/com/securelock/guard/BootReceiver.kt <<'EOF'
+          package com.securelock.guard
+          import android.content.BroadcastReceiver
+          import android.content.Context
+          import android.content.Intent
+          class BootReceiver : BroadcastReceiver() {
+              override fun onReceive(context: Context, intent: Intent?) {
+                  if (intent?.action == Intent.ACTION_BOOT_COMPLETED) {
+                      // Start service if needed, or initialize preferences.
+                  }
+              }
+          }
+          EOF
+
+      - name: Gradle ile APK derle
+        run: gradle --no-daemon :app:assembleDebug
+
+      - name: APK dosyasını GitHub'a yükle
+        uses: actions/upload-artifact@v4
+        with:
+          name: SecureLock-debug-APK
+          path: app/build/outputs/apk/debug/app-debug.apk
+          if-no-files-found: error
